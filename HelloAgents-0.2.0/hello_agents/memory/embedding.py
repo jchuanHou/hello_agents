@@ -175,6 +175,21 @@ class DashScopeEmbedding(EmbeddingModel):
         except ImportError:
             raise ImportError("请安装 dashscope: pip install dashscope")
 
+    # DashScope API 限制
+    _MAX_BATCH_SIZE = 6       # API限制10，留安全余量
+    _MAX_TEXT_LENGTH = 2048   # API限制8192 token，按字符截断留余量
+
+    def _sanitize_inputs(self, inputs: List[str]) -> List[str]:
+        """校验并清理输入文本：去空、截断超长"""
+        sanitized = []
+        for t in inputs:
+            if not t or not t.strip():
+                t = " "  # 空文本替换为空格，避免API拒绝
+            if len(t) > self._MAX_TEXT_LENGTH:
+                t = t[:self._MAX_TEXT_LENGTH]
+            sanitized.append(t)
+        return sanitized
+
     def encode(self, texts: Union[str, List[str]]):
         if isinstance(texts, str):
             inputs = [texts]
@@ -182,6 +197,8 @@ class DashScopeEmbedding(EmbeddingModel):
         else:
             inputs = list(texts)
             single = False
+
+        inputs = self._sanitize_inputs(inputs)
 
         # REST 模式（OpenAI兼容）
         if self.base_url:
@@ -191,32 +208,38 @@ class DashScopeEmbedding(EmbeddingModel):
                 "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
                 "Content-Type": "application/json",
             }
-            payload = {"model": self.model_name, "input": inputs}
-            resp = requests.post(url, headers=headers, json=payload, timeout=30)
-            if resp.status_code >= 400:
-                raise RuntimeError(f"Embedding REST 调用失败: {resp.status_code} {resp.text}")
-            data = resp.json()
-            # 期望结构：{"data": [{"embedding": [...]}]}
-            items = data.get("data") or []
-            vecs = [np.array(item.get("embedding")) for item in items]
+            # 分批请求，遵守 DashScope 批次上限
+            all_vecs = []
+            for i in range(0, len(inputs), self._MAX_BATCH_SIZE):
+                batch = inputs[i:i + self._MAX_BATCH_SIZE]
+                payload = {"model": self.model_name, "input": batch}
+                resp = requests.post(url, headers=headers, json=payload, timeout=30)
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Embedding REST 调用失败: {resp.status_code} {resp.text}")
+                data = resp.json()
+                items = data.get("data") or []
+                all_vecs.extend([np.array(item.get("embedding")) for item in items])
             if single:
-                return vecs[0]
-            return vecs
+                return all_vecs[0]
+            return all_vecs
 
         # SDK 模式
         from dashscope import TextEmbedding
-        rsp = TextEmbedding.call(model=self.model_name, input=inputs)
-        embeddings_obj = None
-        if isinstance(rsp, dict):
-            embeddings_obj = (rsp.get("output") or {}).get("embeddings")
-        else:
-            embeddings_obj = getattr(getattr(rsp, "output", None), "embeddings", None)
-        if not embeddings_obj:
-            raise RuntimeError("DashScope 返回为空或格式不匹配")
-        vecs = [np.array(item.get("embedding") or item.get("vector")) for item in embeddings_obj]
+        all_vecs = []
+        for i in range(0, len(inputs), self._MAX_BATCH_SIZE):
+            batch = inputs[i:i + self._MAX_BATCH_SIZE]
+            rsp = TextEmbedding.call(model=self.model_name, input=batch)
+            embeddings_obj = None
+            if isinstance(rsp, dict):
+                embeddings_obj = (rsp.get("output") or {}).get("embeddings")
+            else:
+                embeddings_obj = getattr(getattr(rsp, "output", None), "embeddings", None)
+            if not embeddings_obj:
+                raise RuntimeError("DashScope 返回为空或格式不匹配")
+            all_vecs.extend([np.array(item.get("embedding") or item.get("vector")) for item in embeddings_obj])
         if single:
-            return vecs[0]
-        return vecs
+            return all_vecs[0]
+        return all_vecs
 
     @property
     def dimension(self) -> int:
