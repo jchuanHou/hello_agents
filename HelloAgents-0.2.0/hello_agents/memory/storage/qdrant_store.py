@@ -195,7 +195,34 @@ class QdrantVectorStore:
                 )
                 logger.info(f"✅ 创建Qdrant集合: {self.collection_name}")
             else:
-                logger.info(f"✅ 使用现有Qdrant集合: {self.collection_name}")
+                # 检查现有集合的向量维度是否匹配
+                try:
+                    existing_info = self.client.get_collection(self.collection_name)
+                    existing_size = existing_info.config.params.vectors.size
+                    if existing_size != self.vector_size:
+                        logger.warning(
+                            f"⚠️ 集合 {self.collection_name} 维度不匹配: "
+                            f"现有={existing_size}, 期望={self.vector_size}，正在重建..."
+                        )
+                        self.client.delete_collection(self.collection_name)
+                        hnsw_cfg = None
+                        try:
+                            hnsw_cfg = models.HnswConfigDiff(m=self.hnsw_m, ef_construct=self.hnsw_ef_construct)
+                        except Exception:
+                            hnsw_cfg = None
+                        self.client.create_collection(
+                            collection_name=self.collection_name,
+                            vectors_config=VectorParams(
+                                size=self.vector_size,
+                                distance=self.distance
+                            ),
+                            hnsw_config=hnsw_cfg
+                        )
+                        logger.info(f"✅ 已重建Qdrant集合: {self.collection_name} (维度={self.vector_size})")
+                    else:
+                        logger.info(f"✅ 使用现有Qdrant集合: {self.collection_name}")
+                except Exception as dim_check_err:
+                    logger.debug(f"跳过维度检查: {dim_check_err}")
                 # 尝试更新 HNSW 配置
                 try:
                     self.client.update_collection(

@@ -3,7 +3,8 @@
     "allow": [
       "Bash(pip show:*)",
       "Bash(.venv/Scripts/python.exe:*)",
-      "Bash(.venv/Scripts/pip.exe list:*)"
+      "Bash(.venv/Scripts/pip.exe list:*)",
+      "Bash(ssh:*)"
     ]
   }
 }
